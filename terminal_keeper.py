@@ -285,11 +285,40 @@ def fetch_balance(platform, api_key, use_proxy=None):
         u = r2.json()
     except Exception:
         raise RuntimeError("usage parse loi")
-    ex = bool(u.get("allowance_exhausted")) or bool(u.get("exhausted"))
+    # --- kiem tra CPU-h (miễn phí) thay vi balance tien ---
+    cpu_used = 0.0
+    for key in ("cpu_hours_used", "cpuHours", "cpu_hours", "used_cpu_hours",
+                "cpu_usage_hours", "cpuHoursUsed"):
+        v = u.get(key)
+        if isinstance(v, (int, float)):
+            cpu_used = float(v)
+            break
+    if cpu_used == 0.0:
+        # thu trong cac trung tam co the khac nhau
+        for section in ("usage", "resources", "compute", "cpu"):
+            sec = u.get(section)
+            if isinstance(sec, dict):
+                for key in ("cpu_hours_used", "cpuHours", "cpu_hours", "used_cpu_hours",
+                            "cpu_usage_hours", "cpuHoursUsed"):
+                    v = sec.get(key)
+                    if isinstance(v, (int, float)):
+                        cpu_used = float(v)
+                        break
+                if cpu_used > 0:
+                    break
+    cpu_limit = 500.0
+    for key in ("cpu_hours_limit", "cpuHoursLimit", "cpu_limit", "cpuHours"):
+        v = u.get(key)
+        if isinstance(v, (int, float)):
+            cpu_limit = float(v)
+            break
+    ex = bool(u.get("allowance_exhausted")) or bool(u.get("exhausted")) or cpu_used >= cpu_limit
     plan = (u.get("plan") or {}).get("plan_key") or "?"
-    reason = u.get("exhausted_reason") or ""
-    txt = "%s · %s" % (plan, ("HẾT" + (" (%s)" % reason if reason else "")) if ex else "OK")
-    return {"text": txt, "exhausted": ex, "invalid": False}
+    txt = "%.1f / %.0f CPU-h · %s" % (cpu_used, cpu_limit, plan)
+    if ex:
+        txt += " (HẾT CPU-h)"
+    return {"text": txt, "exhausted": ex, "invalid": False,
+            "cpu_used": cpu_used, "cpu_limit": cpu_limit}
 
 
 load_store()
@@ -815,7 +844,33 @@ def stop_key_sessions(api_key, reason=""):
     return n
 
 
-def remove_key(api_key, reason=""):
+def remove_key(api_key, reason="", platform=None):
+    # Neu xoa vi het CPU-h (shardflux): tat / xoa may (workspace) truoc khi xoa key kho.
+    if platform == "shardflux":
+        try:
+            items = list_resources("shardflux", api_key)
+        except Exception:
+            items = []
+        hdr = {"Authorization": "Bearer " + api_key, "User-Agent": UA["User-Agent"]}
+        for it in items:
+            rid = it.get("id")
+            if not rid:
+                continue
+            try:
+                # Thu suspend truoc, neu khong co API thi xoa workspace
+                requests.post(
+                    "https://api.shardflux.dev/v1/workspaces/%s/suspend" % rid,
+                    headers=hdr, timeout=15,
+                )
+            except Exception:
+                pass
+            try:
+                requests.delete(
+                    "https://api.shardflux.dev/v1/workspaces/%s" % rid,
+                    headers=hdr, timeout=15,
+                )
+            except Exception:
+                pass
     with KEYLOCK:
         before = len(STORE["keys"])
         STORE["keys"] = [k for k in STORE["keys"] if k.get("key") != api_key]
@@ -901,9 +956,9 @@ def balance_monitor_loop():
             if bal is None:
                 continue
             if bal.get("invalid"):
-                remove_key(k, "key không hợp lệ (401)")
+                remove_key(k, "key không hợp lệ (401)", rec.get("platform"))
             elif bal.get("exhausted"):
-                remove_key(k, "hết balance")
+                remove_key(k, "hết CPU-h (%.1f/%.0f)" % (bal.get("cpu_used", 0), bal.get("cpu_limit", 500)), rec.get("platform"))
         time.sleep(60)
 
 
@@ -1717,10 +1772,10 @@ def api_keys_refresh():
             continue
         updated += 1
         if bal.get("invalid"):
-            remove_key(k, "key không hợp lệ (401)")
+            remove_key(k, "key không hợp lệ (401)", r.get("platform"))
             removed += 1
         elif bal.get("exhausted"):
-            remove_key(k, "hết balance")
+            remove_key(k, "hết CPU-h (%.1f/%.0f)" % (bal.get("cpu_used", 0), bal.get("cpu_limit", 500)), r.get("platform"))
             removed += 1
     return jsonify({"ok": True, "updated": updated, "removed": removed})
 
