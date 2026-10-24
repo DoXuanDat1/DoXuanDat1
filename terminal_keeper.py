@@ -447,7 +447,8 @@ class ShardfluxSession(Session):
             self._token_cache = {}
 
     def _api_with_tok(self, method, url, json=None, headers=None, **kw):
-        """Goi API can tool token; neu bi stale_epoch thi bo token cu, lay token moi va thu lai 1 lan."""
+        """Goi API can tool token; neu bi stale_epoch hoac 401 unknown key thi bo token cu,
+        cho cell thoi gian cap nhat, lay token moi va thu lai 1 lan."""
         h = dict(headers or {})
         last_err = None
         for _ in range(2):
@@ -457,8 +458,10 @@ class ShardfluxSession(Session):
                 return self.api(method, url, json=json, headers=h, **kw)
             except RuntimeError as e:
                 last_err = e
-                if "stale_epoch" in str(e):
+                msg = str(e)
+                if "stale_epoch" in msg or "unauthenticated" in msg or "unknown key" in msg:
                     self._invalidate_token()
+                    self.stop_evt.wait(2)
                     continue
                 raise
         raise last_err
