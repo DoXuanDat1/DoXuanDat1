@@ -272,48 +272,73 @@ def fetch_balance(platform, api_key, use_proxy=None):
         me = r.json()
     except Exception:
         raise RuntimeError("/me parse loi")
+
+    # Helper: tim CPU-h trong mot dict
+    def _find_cpu(d):
+        if not isinstance(d, dict):
+            return None, None
+        for key in ("cpu_hours_used", "cpuHours", "cpu_hours", "used_cpu_hours",
+                    "cpu_usage_hours", "cpuHoursUsed"):
+            v = d.get(key)
+            if isinstance(v, (int, float)):
+                return float(v), None
+        for key in ("cpu_hours_limit", "cpuHoursLimit", "cpu_limit", "cpuHours"):
+            v = d.get(key)
+            if isinstance(v, (int, float)):
+                return None, float(v)
+        return None, None
+
+    # Thu lay CPU-h tu /me truc tiep
+    cpu_used, cpu_limit = _find_cpu(me)
+    if cpu_used is None:
+        # Thu trong cac section co the co trong /me
+        for section in ("usage", "resources", "compute", "cpu", "quota", "subscription"):
+            sec = me.get(section)
+            cu, cl = _find_cpu(sec)
+            if cu is not None:
+                cpu_used = cu
+            if cl is not None:
+                cpu_limit = cl
+            if cpu_used is not None:
+                break
+
     orgs = me.get("memberships") or []
-    if not orgs:
-        return {"text": "khong co org", "exhausted": False, "invalid": False}
-    org = orgs[0].get("organization_id")
-    r2 = get("https://api.shardflux.dev/v1/organizations/%s/usage/summary" % org)
-    if r2.status_code == 401:
-        return bad(401)
-    if r2.status_code >= 400:
-        raise RuntimeError("usage -> %d %s" % (r2.status_code, r2.text[:150]))
-    try:
-        u = r2.json()
-    except Exception:
-        raise RuntimeError("usage parse loi")
-    # --- kiem tra CPU-h (miễn phí) thay vi balance tien ---
-    cpu_used = 0.0
-    for key in ("cpu_hours_used", "cpuHours", "cpu_hours", "used_cpu_hours",
-                "cpu_usage_hours", "cpuHoursUsed"):
-        v = u.get(key)
-        if isinstance(v, (int, float)):
-            cpu_used = float(v)
-            break
-    if cpu_used == 0.0:
-        # thu trong cac trung tam co the khac nhau
-        for section in ("usage", "resources", "compute", "cpu"):
-            sec = u.get(section)
-            if isinstance(sec, dict):
-                for key in ("cpu_hours_used", "cpuHours", "cpu_hours", "used_cpu_hours",
-                            "cpu_usage_hours", "cpuHoursUsed"):
-                    v = sec.get(key)
-                    if isinstance(v, (int, float)):
-                        cpu_used = float(v)
-                        break
-                if cpu_used > 0:
-                    break
-    cpu_limit = 500.0
-    for key in ("cpu_hours_limit", "cpuHoursLimit", "cpu_limit", "cpuHours"):
-        v = u.get(key)
-        if isinstance(v, (int, float)):
-            cpu_limit = float(v)
-            break
-    ex = bool(u.get("allowance_exhausted")) or bool(u.get("exhausted")) or cpu_used >= cpu_limit
-    plan = (u.get("plan") or {}).get("plan_key") or "?"
+    if orgs:
+        org = orgs[0].get("organization_id")
+        try:
+            r2 = get("https://api.shardflux.dev/v1/organizations/%s/usage/summary" % org)
+            if r2.status_code == 401:
+                return bad(401)
+            if r2.status_code < 400:
+                try:
+                    u = r2.json()
+                    cu, cl = _find_cpu(u)
+                    if cu is not None:
+                        cpu_used = cu
+                    if cl is not None:
+                        cpu_limit = cl
+                    # lay plan tu usage summary neu co
+                    plan = (u.get("plan") or {}).get("plan_key") or me.get("plan") or "?"
+                    ex = bool(u.get("allowance_exhausted")) or bool(u.get("exhausted")) or (cpu_used is not None and cpu_limit is not None and cpu_used >= cpu_limit)
+                    if cpu_limit is None:
+                        cpu_limit = 500.0
+                    txt = "%.1f / %.0f CPU-h · %s" % (cpu_used or 0.0, cpu_limit, plan)
+                    if ex:
+                        txt += " (HẾT CPU-h)"
+                    return {"text": txt, "exhausted": ex, "invalid": False,
+                            "cpu_used": cpu_used or 0.0, "cpu_limit": cpu_limit}
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if cpu_used is None:
+        return {"text": "khong co thong tin CPU-h", "exhausted": False, "invalid": False}
+
+    if cpu_limit is None:
+        cpu_limit = 500.0
+    plan = me.get("plan") or "?"
+    ex = cpu_used >= cpu_limit
     txt = "%.1f / %.0f CPU-h · %s" % (cpu_used, cpu_limit, plan)
     if ex:
         txt += " (HẾT CPU-h)"
